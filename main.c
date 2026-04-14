@@ -12,6 +12,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 
 #include "import.h"
 #include "cmdline.h"
@@ -596,6 +597,84 @@ inline static int new_socket() {
     }
 }
 
+static void handle_unix(const int connfd) {
+    void **const kdContext = getKdContext("0", "skd://itunes.apple.com/P000000000/s1/e1");
+    if (kdContext == NULL)
+        return;
+
+    while (1) {
+        uint32_t size;
+        if (!readfull(connfd, &size, sizeof(uint32_t)))
+            return;
+
+        if (size == 0)
+            return;
+
+        void *sample = malloc(size);
+        if (sample == NULL) {
+            perror("malloc");
+            return;
+        }
+        if (!readfull(connfd, sample, size)) {
+            free(sample);
+            return;
+        }
+
+        NfcRKVnxuKZy04KWbdFu71Ou(*kdContext, 5, sample, sample, size);
+        writefull(connfd, sample, size);
+        free(sample);
+    }
+}
+
+static void *new_socket_unix_decrypt(void *args) {
+    char *sock_path = strcat_b(args_info.base_dir_arg, "/decrypt.sock");
+    if (sock_path == NULL) {
+        perror("malloc");
+        return NULL;
+    }
+
+    unlink(sock_path);
+
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd == -1) {
+        perror("socket");
+        free(sock_path);
+        return NULL;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+    free(sock_path);
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
+        perror("bind");
+        close(fd);
+        return NULL;
+    }
+
+    if (listen(fd, 5) == -1) {
+        perror("listen");
+        close(fd);
+        return NULL;
+    }
+
+    fprintf(stderr, "[!] unix decrypt socket ready\n");
+
+    while (1) {
+        const int connfd = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
+        if (connfd == -1) {
+            perror("accept4");
+            continue;
+        }
+        handle_unix(connfd);
+        close(connfd);
+    }
+
+    return NULL;
+}
+
 
 const char* get_m3u8_method_download(struct shared_ptr reqCtx, unsigned long adam) {
     void *purchase_request = malloc(1024);
@@ -1076,6 +1155,10 @@ int main(int argc, char *argv[]) {
     pthread_t account_thread;
     pthread_create(&account_thread, NULL, &new_socket_account, NULL);
     pthread_detach(account_thread);
+
+    pthread_t unix_decrypt_thread;
+    pthread_create(&unix_decrypt_thread, NULL, &new_socket_unix_decrypt, NULL);
+    pthread_detach(unix_decrypt_thread);
 
     return new_socket();
 }
